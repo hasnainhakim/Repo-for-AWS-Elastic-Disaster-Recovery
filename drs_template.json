@@ -1,0 +1,214 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "CloudFormation Template to create DRS IAM Role and Custom SSM DRS document",
+    "Parameters": {
+      "SSMManagedInstances": {
+        "Type": "String",
+        "Default": "true",
+        "AllowedValues": ["true", "false"]
+      },
+      "InstanceProfile": {
+        "Type": "String",
+        "AllowedPattern": "^[a-zA-Z0-9+=,.@_\\-/]{1,64}$"
+      },
+      "IamRoleName": {
+        "Type": "String",
+        "Default": "DRS-Agent-Deployment-Role"
+      }
+    },
+    "Metadata": {
+      "AWS::CloudFormation::Interface": {
+        "ParameterGroups": [
+          {
+            "Label": {
+              "default": "AWS DRS IAM Access"
+            },
+            "Parameters": [
+              "SSMManagedInstances",
+              "InstanceProfile",
+              "IamRoleName"
+            ]
+          }
+        ],
+        "ParameterLabels": {
+          "SSMManagedInstances": {
+            "default": "Are the Source Servers AWS Systems Manager managed?"
+          },
+          "InstanceProfile": {
+            "default": "Enter Instance Profile Role name that is attached to an EC2 Instance."
+          },
+          "IamRoleName": {
+            "default": "Enter name for the DRS Agent Deployment IAM Role."
+          }
+        }
+      }
+    },
+    "Conditions": {
+      "IsInstanceManaged": {
+        "Fn::Equals": [
+          {
+            "Ref": "SSMManagedInstances"
+          },
+          "true"
+        ]
+      }
+    },
+    "Resources": {
+      "SSMdocument": {
+        "Type": "AWS::SSM::Document",
+        "Properties": {
+          "TargetType": "/AWS::EC2::Instance",
+          "Content": {
+            "schemaVersion": "2.2",
+            "description": "Use this document to install the Elastic Disaster Recovery agent on target instances. You will need the IAM User with the required permissions. The required permission can be found here https://docs.aws.amazon.com/drs/latest/userguide/agent-installation.html#credentials ",
+            "parameters": {
+              "Region": {
+                "description": "(Required) Enter the AWS Disaster Recovery Region",
+                "type": "String",
+                "allowedValues": [
+                  "us-east-1",
+                  "us-east-2",
+                  "us-west-1",
+                  "us-west-2",
+                  "ap-southeast-1",
+                  "ap-southeast-2",
+                  "ap-southeast-3",
+                  "ap-northeast-1",
+                  "ap-northeast-2",
+                  "ap-northeast-3",
+                  "eu-central-1",
+                  "eu-west-1",
+                  "eu-west-2",
+                  "eu-west-3",
+                  "ca-central-1",
+                  "ap-south-1",
+                  "sa-east-1",
+                  "eu-north-1",
+                  "me-south-1",
+                  "af-south-1",
+                  "ap-east-1",
+                  "eu-south-1"
+                ]
+              },
+              "RoleArn": {
+                "description": "Required) Enter the AWS Disaster Recovery IAM Role",
+                "type": "String"
+              },
+              "TimeoutSeconds": {
+                "type": "String",
+                "description": "(Optional) The time in seconds for a command to be completed before it is considered to have failed.",
+                "default": "3600"
+              }
+            },
+            "mainSteps": [
+              {
+                "precondition": {
+                  "StringEquals": ["platformType", "Linux"]
+                },
+                "action": "aws:runShellScript",
+                "name": "runShellScript",
+                "inputs": {
+                  "timeoutSeconds": "{{ TimeoutSeconds }}",
+                  "runCommand": [
+                    "#!/bin/bash",
+                    "cd /tmp",
+                    "function agent_deployment {",
+                    "    export $(printf 'AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s' $(aws sts assume-role --role-arn {{RoleArn}} --role-session-name drs --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' --output text))",
+                    "    wget -O ./aws-replication-installer-init.py https://aws-elastic-disaster-recovery-{{Region}}.s3.amazonaws.com/latest/linux/aws-replication-installer-init.py",
+                    "    sudo python3 aws-replication-installer-init.py --region {{Region}} --aws-access-key-id $AWS_ACCESS_KEY_ID --aws-secret-access-key $AWS_SECRET_ACCESS_KEY --aws-session-token $AWS_SESSION_TOKEN --no-prompt",
+                    "}",
+                    "if which aws >/dev/null 2>&1; then",
+                    "    agent_deployment",
+                    "    exit 0",
+                    "elif which unzip >/dev/null 2>&1; then",
+                    "    curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip'",
+                    "    unzip awscliv2.zip",
+                    "    sudo ./aws/install",
+                    "    agent_deployment",
+                    "    exit 1",
+                    "else",
+                    "    apt-get install unzip -y",
+                    "    curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip'",
+                    "    unzip awscliv2.zip",
+                    "    sudo ./aws/install",
+                    "    agent_deployment",
+                    "    exit 2",
+                    "fi"
+                  ]
+                }
+              },
+              {
+                "precondition": {
+                  "StringEquals": ["platformType", "Windows"]
+                },
+                "action": "aws:runPowerShellScript",
+                "name": "runPowerShellScript",
+                "inputs": {
+                  "timeoutSeconds": "{{ TimeoutSeconds }}",
+                  "runCommand": [
+                    "function agent_deployment {",
+                    "    $dir = $env:TEMP + '\\drs'",
+                    "    New-Item -ItemType directory -Path $dir -Force",
+                    "    cd $dir",
+                    "    $creds=(aws sts assume-role --role-arn {{RoleArn}} --role-session-name drs --query Credentials.[AccessKeyId,SecretAccessKey,SessionToken] --output text)",
+                    "    $AWS_ACCESS_KEY_ID,$AWS_SECRET_ACCESS_KEY,$AWS_SESSION_TOKEN = -split $creds",
+                    "    (New-Object System.Net.WebClient).DownloadFile(\"https://aws-elastic-disaster-recovery-{{Region}}.s3.amazonaws.com/latest/windows/AwsReplicationWindowsInstaller.exe\", $dir + \"\\AwsReplicationWindowsInstaller.exe\")",
+                    "    Start-Process .\\AwsReplicationWindowsInstaller.exe -ArgumentList @(\"--region\", \"{{Region}}\", \"--aws-access-key-id\", \"$AWS_ACCESS_KEY_ID\", \"--aws-secret-access-key\", \"$AWS_SECRET_ACCESS_KEY\", \"--aws-session-token\", \"$AWS_SESSION_TOKEN\", \"--no-prompt\") -Wait",
+                    "}",
+                    "If (Test-Path -Path 'C:\\Program Files\\Amazon\\AWSCLIV2\\aws.exe') {",
+                    "    agent_deployment",
+                    "}",
+                    "Else {",
+                    "    Start-Process msiexec.exe -Wait -ArgumentList '/i https://awscli.amazonaws.com/AWSCLIV2.msi /quiet'",
+                    "    $Env:PATH += ';C:\\Program Files\\Amazon\\AWSCLIV2\\'",
+                    "    agent_deployment",
+                    "}"
+                  ]
+                }
+              }
+            ]
+          },
+          "DocumentType": "Command",
+          "Name": "DRS-SSM-Installer-Document"
+        }
+      },
+      "IamRole": {
+        "Type": "AWS::IAM::Role",
+        "DeletionPolicy": "Retain",
+        "UpdateReplacePolicy": "Retain",
+        "Condition": "IsInstanceManaged",
+        "Properties": {
+          "Description": "Iam Role for DRS Agent Deployment",
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "AWS": {
+                    "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${InstanceProfile}"
+                  }
+                },
+                "Action": ["sts:AssumeRole"]
+              }
+            ]
+          },
+          "ManagedPolicyArns": [
+            "arn:aws:iam::aws:policy/service-role/AWSElasticDisasterRecoveryEc2InstancePolicy"
+          ],
+          "RoleName": { "Ref": "IamRoleName" }
+        }
+      }
+    },
+    "Outputs": {
+      "OutputIamRole": {
+        "Description": "IAM Role ARN",
+        "Value": { "Fn::GetAtt": ["IamRole", "Arn"] },
+        "Condition": "IsInstanceManaged"
+      },
+      "OutputSSMDocument": {
+        "Description": "Custom SSM Command document for DRS agent installation",
+        "Value": { "Ref": "SSMdocument" }
+      }
+    }
+  }
